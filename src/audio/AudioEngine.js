@@ -10,16 +10,17 @@ export class AudioEngine {
     constructor() {
         this.initialized = false;
         
-        // Chords: DbM7 add9, Fm7 add11, GM7 add9, FM7 add9
+        // Chords: DbM7 add9, Fm7 add11, DbM7 add9, Fm7 add11
         this.chords = [
             ['Db2', 'Ab2', 'C3', 'Eb3', 'F3'],
             ['F2', 'C3', 'Eb3', 'Ab3', 'Bb3'],
-            ['G2', 'D3', 'F#3', 'A3', 'B3'],
-            ['F2', 'C3', 'E3', 'G3', 'A3']
+            ['Db2', 'Ab2', 'C3', 'Eb3', 'F3'],
+            ['F2', 'C3', 'Eb3', 'Ab3', 'Bb3'],
         ];
         
         this.currentChordIndex = 0;
         this.chordTransitionTime = 0;
+        this.superSawActive = false;
     }
 
     async init() {
@@ -70,8 +71,28 @@ export class AudioEngine {
         this.leadSynth.connect(this.fxSend);
         this.leadSynth.volume.value = -100; // Start silent
 
+        // --- LAYER 5: Super-saw mass (Click + Drag) ---
+        this.superSaw = new Tone.MonoSynth({
+            oscillator: { type: 'fatsawtooth', count: 3, spread: 22 },
+            envelope: { attack: 0.6, decay: 0.8, sustain: 0.7, release: 2.4 },
+            filter: { Q: 0.8, type: 'lowpass', rolloff: -24 }
+        });
+        this.superSawDist = new Tone.Distortion({ distortion: 0.15, wet: 0.1 }).connect(this.limiter);
+        this.superSawDry = new Tone.Gain(1).connect(this.limiter);
+        this.superSaw.connect(this.superSawDist);
+        this.superSaw.connect(this.superSawDry);
+        this.superSaw.connect(this.fxSend);
+        this.superSaw.volume.value = -100;
+
         this.initialized = true;
         this.startGenerativeLoop();
+
+        // Keep the super-saw oscillator running; drag controls its audible level.
+        const chord = this.chords[this.currentChordIndex];
+        const baseNote = chord[1] ?? chord[0];
+        const note = Tone.Frequency(baseNote).transpose(-2).toFrequency();
+        this.superSaw.triggerAttack(note);
+        this.superSawActive = true;
     }
 
     startGenerativeLoop() {
@@ -98,12 +119,15 @@ export class AudioEngine {
         // Monophonic Probabilistic (High Register)
         Tone.Transport.scheduleRepeat((time) => {
             const focus = signals.params.focus;
-            if (Math.random() < focus * 0.8) {
+            const velocity = signals.params.velocity;
+            const probability = Math.min(1, 0.05 + focus * 0.4 + velocity * 0.8);
+            if (Math.random() < probability) {
                 const chord = this.chords[this.currentChordIndex];
                 // Transpose up 2 octaves for high register
                 const noteBase = chord[Math.floor(Math.random() * chord.length)];
                 const note = Tone.Frequency(noteBase).transpose(24);
-                this.grainSynth.triggerAttackRelease(note, "16n", time, 0.2 + focus * 0.5);
+                const velocityAmp = 0.2 + focus * 0.4 + velocity * 0.4;
+                this.grainSynth.triggerAttackRelease(note, "16n", time, velocityAmp);
             }
         }, "8n");
 
@@ -122,6 +146,9 @@ export class AudioEngine {
         
         const energy = signals.params.energy;
         const focus = signals.params.focus;
+        const sharpness = signals.params.sharpness;
+        const dragActive = signals.params.dragActive;
+        const dragForce = signals.params.dragForce;
         
         // Modulate pad volume and filter
         this.pad.volume.rampTo(-15 + energy * 10, 0.1);
@@ -151,6 +178,33 @@ export class AudioEngine {
                 this.leadSynth.triggerRelease();
             }
         }
+
+        // Super-saw mass (continuous oscillator, drag-modulated gain/timbre)
+        const chord = this.chords[this.currentChordIndex];
+        const baseNote = chord[1] ?? chord[0];
+        const dynamic = dragForce * dragActive;
+        const note = Tone.Frequency(baseNote).transpose(-2 + dynamic * 5).toFrequency();
+        const cutoffTarget = 350 + dynamic * 1800 + sharpness * 2200;
+        const attack = 0.6 - sharpness * 0.4;
+        const distAmount = 0.05 + sharpness * 0.45;
+        const spread = 14 + dynamic * 35;
+
+        this.superSaw.envelope.attack = Math.max(0.08, attack);
+        this.superSaw.filter.Q.value = 0.6 + sharpness * 6;
+        this.superSaw.filter.frequency.rampTo(cutoffTarget, 0.2);
+        if (this.superSaw.oscillator?.spread !== undefined) {
+            this.superSaw.oscillator.spread = spread;
+        }
+        this.superSawDist.wet.rampTo(0.08 + Math.min(0.4, sharpness * 0.6) * dragActive, 0.2);
+        this.superSawDist.distortion = distAmount;
+        const targetVolume = -100 + dragActive * (70 + dynamic * 14);
+        this.superSaw.volume.rampTo(targetVolume, 0.2);
+
+        if (!this.superSawActive) {
+            this.superSaw.triggerAttack(note);
+            this.superSawActive = true;
+        }
+        this.superSaw.frequency.rampTo(note, 0.1);
     }
 }
 

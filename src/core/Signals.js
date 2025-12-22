@@ -12,6 +12,10 @@ export class Signals {
             resonance: 0.2, // Harmonic complexity (0-1)
             texture: 0.12,  // Particle/noise density (0-1)
             drag: 0,        // Intentional dragging movement (0-1)
+            dragActive: 0,  // Click-and-drag active state (0-1)
+            velocity: 0,    // Smoothed cursor speed (0-1)
+            sharpness: 0,   // Smoothed cursor angularity (0-1)
+            dragForce: 0,   // Smoothed drag dynamics (0-1)
             position: { x: 0.5, y: 0.5 }, // Smoothed cursor position
             drift: 0        // Autonomous system drift
         };
@@ -27,6 +31,10 @@ export class Signals {
             resonance: 0.03,
             texture: 0.02,
             drag: 0.05,
+            dragActive: 0.2,
+            velocity: 0.08,
+            sharpness: 0.08,
+            dragForce: 0.07,
             position: 0.08,
             drift: 0.005
         };
@@ -52,6 +60,9 @@ export class Signals {
         this.targets.energy *= 0.995;
         this.targets.focus *= 0.99;
         this.targets.drag *= 0.95;
+        this.targets.velocity *= 0.88;
+        this.targets.sharpness *= 0.85;
+        this.targets.dragForce *= 0.86;
 
         // Lerp params towards targets
         for (const key in this.params) {

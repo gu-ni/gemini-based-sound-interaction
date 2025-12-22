@@ -9,6 +9,8 @@ export class Interaction {
     constructor() {
         this.isMouseDown = false;
         this.lastPosition = { x: 0.5, y: 0.5 };
+        this.lastVector = { x: 0, y: 0 };
+        this.lastTime = performance.now();
         
         this.init();
     }
@@ -32,6 +34,27 @@ export class Interaction {
         const dx = x - this.lastPosition.x;
         const dy = y - this.lastPosition.y;
         const dist = Math.sqrt(dx * dx + dy * dy);
+
+        const now = performance.now();
+        const dt = Math.max(0.001, (now - this.lastTime) / 1000);
+        const speed = dist / dt;
+        const maxSpeed = 3;
+        const velocity = Math.min(1, speed / maxSpeed);
+        signals.perturb('velocity', velocity);
+
+        const magPrev = Math.hypot(this.lastVector.x, this.lastVector.y);
+        const magCurr = Math.hypot(dx, dy);
+        let sharpness = 0;
+        if (magPrev > 0.0001 && magCurr > 0.0001) {
+            const dot = (this.lastVector.x * dx + this.lastVector.y * dy) / (magPrev * magCurr);
+            const clamped = Math.max(-1, Math.min(1, dot));
+            const angle = Math.acos(clamped);
+            sharpness = Math.min(1, angle / Math.PI);
+        }
+        signals.perturb('sharpness', sharpness);
+
+        const dragForce = this.isMouseDown ? Math.min(1, 0.05 + velocity * 0.9 + dist * 10) : 0;
+        signals.perturb('dragForce', dragForce);
         
         signals.perturb('energy', dist * 2);
         signals.perturb('focus', 0.2 + dist * 5);
@@ -41,10 +64,13 @@ export class Interaction {
         }
         
         this.lastPosition = { x, y };
+        this.lastVector = { x: dx, y: dy };
+        this.lastTime = now;
     }
 
     handleDown(e) {
         this.isMouseDown = true;
+        signals.perturb('dragActive', 1);
         // High-register activation hint
         signals.perturb('energy', 0.3);
         signals.perturb('focus', 0.8);
@@ -53,6 +79,7 @@ export class Interaction {
 
     handleUp() {
         this.isMouseDown = false;
+        signals.perturb('dragActive', 0);
         signals.perturb('focus', 0.2);
     }
 
