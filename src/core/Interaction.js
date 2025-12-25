@@ -5,6 +5,8 @@
 
 import { signals } from './Signals.js';
 
+console.log('[Interaction] FILE LOADED');
+
 export class Interaction {
     constructor() {
         this.isMouseDown = false;
@@ -16,12 +18,18 @@ export class Interaction {
     }
 
     init() {
-        window.addEventListener('mousemove', (e) => this.handleMove(e));
-        window.addEventListener('mousedown', (e) => this.handleDown(e));
-        window.addEventListener('mouseup', (e) => this.handleUp(e));
-        window.addEventListener('touchstart', (e) => this.handleTouch(e), { passive: false });
-        window.addEventListener('touchmove', (e) => this.handleTouch(e), { passive: false });
-        window.addEventListener('touchend', () => this.handleUp());
+        console.log('[Interaction] INIT');
+        window.addEventListener('pointerdown', (e) => {
+            console.log('[RAW POINTERDOWN]', e.target);
+            this.handleDown(e);
+        });
+        window.addEventListener('pointermove', (e) => this.handleMove(e));
+        window.addEventListener('pointerdown', (e) => this.handleDown(e));
+        window.addEventListener('pointerup', (e) => this.handleUp(e));
+        window.addEventListener('pointercancel', (e) => this.handleUp(e));
+        
+        // Prevent default touch actions to avoid scrolling during interaction
+        window.addEventListener('touchstart', (e) => e.preventDefault(), { passive: false });
     }
 
     handleMove(e) {
@@ -51,6 +59,11 @@ export class Interaction {
             const angle = Math.acos(clamped);
             sharpness = Math.min(1, angle / Math.PI);
         }
+        signals.perturb(
+            'dragActive',
+            this.isMouseDown ? 1 : 0,
+            true // 🔥 force
+        );
         signals.perturb('sharpness', sharpness);
 
         const dragForce = this.isMouseDown ? Math.min(1, 0.05 + velocity * 0.9 + dist * 10) : 0;
@@ -70,7 +83,6 @@ export class Interaction {
 
     handleDown(e) {
         this.isMouseDown = true;
-        signals.perturb('dragActive', 1);
         // High-register activation hint
         signals.perturb('energy', 0.3);
         signals.perturb('focus', 0.8);
@@ -79,8 +91,6 @@ export class Interaction {
 
     handleUp() {
         this.isMouseDown = false;
-        signals.perturb('dragActive', 0);
-        signals.perturb('focus', 0.2);
     }
 
     handleTouch(e) {

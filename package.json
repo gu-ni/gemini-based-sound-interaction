@@ -12,6 +12,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "three": "^0.182.0",
     "tone": "^15.1.22",
     "vite": "^7.3.0"
   }

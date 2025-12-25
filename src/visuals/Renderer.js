@@ -1,268 +1,617 @@
 /**
  * Renderer.js
- * Immersive audiovisual renderer simulating 3D lighting and technical geometry.
+ * Three.js atmospheric industrial interior matching reference mood.
  */
 
+import * as THREE from 'three';
 import { signals } from '../core/Signals.js';
+
+function createIrregularHeptagonPath(radius, irregularity = 0.12) {
+    const path = new THREE.Path();
+    const points = [];
+
+    for (let i = 0; i < 7; i++) {
+        const angle = (i / 7) * Math.PI * 2;
+        const variation = 1 + (Math.random() * 2 - 1) * irregularity;
+        const r = radius * variation;
+
+        points.push(new THREE.Vector2(
+            Math.cos(angle) * r,
+            Math.sin(angle) * r
+        ));
+    }
+
+    path.moveTo(points[0].x, points[0].y);
+    for (let i = 1; i < points.length; i++) {
+        path.lineTo(points[i].x, points[i].y);
+    }
+    path.closePath();
+
+    return path;
+}
+
+function edgeWeightedInput(v, deadZone = 0.2, power = 2.5) {
+    const a = Math.abs(v);
+    if (a < deadZone) return 0;
+
+    // dead zone 밖을 0~1로 정규화
+    const t = (a - deadZone) / (1.0 - deadZone);
+
+    // 가장자리에서 급격히 커지게
+    const eased = Math.pow(t, power);
+
+    return Math.sign(v) * eased;
+}
 
 export class Renderer {
     constructor(canvasId) {
         this.canvas = document.getElementById(canvasId);
-        this.ctx = this.canvas.getContext('2d');
-        
-        this.width = 0;
-        this.height = 0;
-        this.mesh = [];
-        this.meshCols = 72;
-        this.meshRows = 42;
-        this.time = 0;
-        this.lastTime = performance.now();
-        this.meshFrame = null;
-        
-        this.resize();
+        this.renderer = new THREE.WebGLRenderer({
+            canvas: this.canvas,
+            antialias: true,
+            alpha: false
+        });
+        this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        this.renderer.setSize(window.innerWidth, window.innerHeight, false);
+        this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+        this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        this.renderer.toneMappingExposure = 1.25; // Brighter overall scene
+        this.renderer.shadowMap.enabled = true;
+        this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        this.renderer.setClearColor(0x0a0d12, 1);
+
+        this.scene = new THREE.Scene();
+        this.scene.background = new THREE.Color(0x0a0d12);
+        this.scene.fog = new THREE.FogExp2(0x0c121a, 0.02);
+        this.shellEnergy = 0.0;
+        this.coreEnergy = 0.0;
+
+        this.camera = new THREE.PerspectiveCamera(42, window.innerWidth / window.innerHeight, 0.1, 160);
+        this.camera.position.set(-10, 12, 35);
+        this.camera.lookAt(0, 8, -15);
+
+        this.clock = new THREE.Clock();
+        this.lights = {};
+        this.beams = [];
+        this.hazePlanes = [];
+
+        this.initEnvironment();
+        this.initInteractiveObject();
+        this.initLighting();
+        this.initHaze();
+        this.initPipes();
+        // this.initCables();
+        this.initParticles();
+
         window.addEventListener('resize', () => this.resize());
-        
-        this.initMesh();
     }
 
     resize() {
-        this.width = window.innerWidth;
-        this.height = window.innerHeight;
-        this.canvas.width = this.width * window.devicePixelRatio;
-        this.canvas.height = this.height * window.devicePixelRatio;
-        this.ctx.setTransform(1, 0, 0, 1, 0, 0);
-        this.ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+        const width = window.innerWidth;
+        const height = window.innerHeight;
+        this.renderer.setSize(width, height, false);
+        this.camera.aspect = width / height;
+        this.camera.updateProjectionMatrix();
+    }
+    
+    createSteppedFloor() {
+        const group = new THREE.Group();
+
+        const levels = 4;
+        const baseRadius = 35;      // hole 최대 크기
+        const stepHeight = 2;
+        const plateThickness = 2;
+
+        const floorMat = new THREE.MeshStandardMaterial({
+            color: 0x151c26,
+            roughness: 0.75,
+            metalness: 0.3
+        });
+
+        for (let i = 0; i < levels; i++) {
+            // 1️⃣ 바깥 바닥 (충분히 큰 사각형)
+            const shape = new THREE.Shape();
+            const size = 120;
+            shape.moveTo(-size, -size);
+            shape.lineTo(size, -size);
+            shape.lineTo(size, size);
+            shape.lineTo(-size, size);
+            shape.closePath();
+
+            // 2️⃣ 안쪽 7각형 hole
+            const holeRadius = baseRadius * (1 - i * 0.22);
+            const hole = createIrregularHeptagonPath(holeRadius, 0.12);
+            shape.holes.push(hole);
+
+            // 3️⃣ 얇게 extrude
+            const geometry = new THREE.ExtrudeGeometry(shape, {
+                depth: plateThickness,
+                bevelEnabled: false
+            });
+
+            geometry.rotateX(-Math.PI / 2);
+
+            const mesh = new THREE.Mesh(geometry, floorMat);
+            mesh.receiveShadow = true;
+
+            // 4️⃣ 계단 위치
+            mesh.position.y = -i * stepHeight;
+
+            group.add(mesh);
+        }
+        
+        // ===== Bottom solid plate (no hole) =====
+        const bottomShape = new THREE.Shape();
+        const size = 120;
+
+        bottomShape.moveTo(-size, -size);
+        bottomShape.lineTo(size, -size);
+        bottomShape.lineTo(size, size);
+        bottomShape.lineTo(-size, size);
+        bottomShape.closePath();
+
+        const bottomGeometry = new THREE.ExtrudeGeometry(bottomShape, {
+            depth: plateThickness,
+            bevelEnabled: false
+        });
+
+        bottomGeometry.rotateX(-Math.PI / 2);
+
+        const bottomMesh = new THREE.Mesh(bottomGeometry, floorMat);
+        bottomMesh.receiveShadow = true;
+
+        // hole 판들보다 한 단계 더 아래
+        bottomMesh.position.y = -levels * stepHeight;
+
+        group.add(bottomMesh);
+
+        this.scene.add(group);
     }
 
-    initMesh() {
-        this.mesh = [];
-        for (let v = 0; v <= this.meshRows; v++) {
-            for (let u = 0; u <= this.meshCols; u++) {
-                const uu = u / this.meshCols;
-                const vv = v / this.meshRows;
-                this.mesh.push({
-                    u: uu,
-                    v: vv,
-                    theta: uu * Math.PI * 2,
-                    phi: (vv - 0.5) * Math.PI,
-                    stretchMask: Math.random(),
-                    stretch: 0
-                });
+    initEnvironment() {
+        this.createSteppedFloor();
+        const wallMat = new THREE.MeshStandardMaterial({
+            color: 0x202a3a, // Brighter base wall
+            roughness: 0.6,
+            metalness: 0.3
+        });
+        
+        const addWallGroup = (w, h, d, x, y, z, rotY = 0) => {
+            const group = new THREE.Group();
+            const mainWall = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), wallMat);
+            mainWall.receiveShadow = true;
+            group.add(mainWall);
+            
+            for (let i = 0; i < 4; i++) {
+                const panel = new THREE.Mesh(new THREE.BoxGeometry(w * 0.7, h * 0.12, d * 1.4), wallMat);
+                panel.position.y = -h * 0.3 + i * h * 0.2;
+                panel.position.z = d * 0.25;
+                group.add(panel);
+            }
+            
+            group.position.set(x, y, z);
+            group.rotation.y = rotY;
+            this.scene.add(group);
+        };
+
+        addWallGroup(140, 60, 2, 0, 30, -50); 
+        addWallGroup(2, 60, 140, -50, 30, 0); 
+        addWallGroup(2, 60, 140, 50, 30, 0); 
+
+        const columnMat = new THREE.MeshStandardMaterial({
+            color: 0x121822,
+            roughness: 0.5,
+            metalness: 0.5
+        });
+        for (let i = 0; i < 4; i++) {
+            const x = (i % 2 === 0 ? -1 : 1) * 42;
+            const z = -35 + Math.floor(i / 2) * 50;
+            const col = new THREE.Mesh(new THREE.BoxGeometry(5, 60, 5), columnMat);
+            col.position.set(x, 30, z);
+            col.castShadow = true;
+            col.receiveShadow = true;
+            this.scene.add(col);
+        }
+
+        const windowMat = new THREE.MeshStandardMaterial({
+            color: 0x2a364a,
+            emissive: 0x9bbce0,
+            emissiveIntensity: 1.8,
+            transparent: true,
+            opacity: 0.8
+        });
+        const windowGroup = new THREE.Group();
+        for (let r = 0; r < 2; r++) {
+            for (let c = 0; c < 6; c++) {
+                const pane = new THREE.Mesh(new THREE.PlaneGeometry(8, 12), windowMat);
+                pane.position.set(-25 + c * 10, 35 + r * 15, -49.2);
+                windowGroup.add(pane);
             }
         }
+        this.scene.add(windowGroup);
+
+        this.lightTargets = {
+            main: new THREE.Object3D(),
+            side: new THREE.Object3D()
+        };
+        this.lightTargets.main.position.set(0, 8, -15);
+        this.lightTargets.side.position.set(-15, 4, -25);
+        this.scene.add(this.lightTargets.main, this.lightTargets.side);
+    }
+
+    initLighting() {
+        this.lights.ambient = new THREE.AmbientLight(0x2a364a, 0.5); // Brighter ambient
+        this.scene.add(this.lights.ambient);
+
+        this.lights.key = new THREE.DirectionalLight(0xb2c0d4, 2.0);
+        this.lights.key.position.set(30, 60, -70);
+        this.lights.key.castShadow = true;
+        this.lights.key.shadow.mapSize.set(512, 512);
+        this.scene.add(this.lights.key);
+
+        this.lights.spotMain = new THREE.SpotLight(0xd2deec, 4.5, 180, Math.PI / 8, 0.4, 1.2);
+        this.lights.spotMain.position.set(45, 60, 40);
+        this.lights.spotMain.target = this.lightTargets.main;
+        this.lights.spotMain.castShadow = true;
+        this.lights.spotMain.shadow.mapSize.set(512, 512);
+
+        this.scene.add(this.lights.spotMain);
+
+        // Dynamic core light - linked to click/drag
+        this.lights.accent = new THREE.PointLight(
+            0xffa550,
+            12.0,   // intensity 대폭 증가
+            120,    // distance 확장
+            1.0     // decay 완화 (중요!)
+        );
+        this.lights.accent.position.set(0, 8, -15);
+        this.lights.accent.castShadow = false;
+        this.scene.add(this.lights.accent);
+
+        this.lights.redMarker = new THREE.PointLight(0xff4444, 1.2, 18);
+        this.lights.redMarker.position.set(-20, 5, -35);
+        this.scene.add(this.lights.redMarker);
+
+        this.beams.push(this.createBeam(this.lights.spotMain, 120, 20, 0xa5b8cf, 0.3));
+        this.beams.forEach((beam) => this.scene.add(beam));
+        
+        this.lights.coreGlow = new THREE.PointLight(
+            0xffa550,
+            20.0,
+            60,
+            1.0
+        );
+        this.lights.coreGlow.position.copy(this.coreGroup.position);
+        this.lights.coreGlow.castShadow = false;
+        this.scene.add(this.lights.coreGlow);
+
+    }
+
+    initPipes() {
+        const pipeMat = new THREE.MeshStandardMaterial({
+            color: 0x1a212b,
+            roughness: 0.4,
+            metalness: 0.6
+        });
+        for (let i = 0; i < 8; i++) {
+            const pipe = new THREE.Mesh(new THREE.CylinderGeometry(0.6, 0.6, 160, 8), pipeMat);
+            pipe.rotation.z = Math.PI / 2;
+            pipe.position.set(0, 15 + i * 6, -48);
+            this.scene.add(pipe);
+        }
+    }
+
+    initCables() {
+        const cableMat = new THREE.LineBasicMaterial({ color: 0x080808, linewidth: 1 });
+        for (let i = 0; i < 12; i++) {
+            const points = [];
+            for (let j = 0; j < 4; j++) {
+                points.push(new THREE.Vector3(
+                    -60 + Math.random() * 120,
+                    60 - j * 15,
+                    -60 + Math.random() * 120
+                ));
+            }
+            const curve = new THREE.CatmullRomCurve3(points);
+            const geometry = new THREE.BufferGeometry().setFromPoints(curve.getPoints(16));
+            const cable = new THREE.Line(geometry, cableMat);
+            this.scene.add(cable);
+        }
+    }
+
+    initParticles() {
+        const count = 0; // Optimized count
+        const geometry = new THREE.BufferGeometry();
+        const positions = new Float32Array(count * 3);
+        const offsets = new Float32Array(count);
+        for (let i = 0; i < count; i++) {
+            positions[i * 3] = Math.random() * 140 - 70;
+            positions[i * 3 + 1] = Math.random() * 60;
+            positions[i * 3 + 2] = Math.random() * 140 - 70;
+            offsets[i] = Math.random() * Math.PI * 2;
+        }
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geometry.setAttribute('offset', new THREE.BufferAttribute(offsets, 1));
+        
+        const material = new THREE.ShaderMaterial({
+            uniforms: {
+                time: { value: 0 },
+                energy: { value: 0 },
+                color: { value: new THREE.Color(0xffffff) }
+            },
+            vertexShader: `
+                uniform float time;
+                uniform float energy;
+                attribute float offset;
+                void main() {
+                    vec3 pos = position;
+                    pos.y += sin(time * 0.4 + offset) * (1.0 + energy * 3.0);
+                    vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+                    float size = 2.0 * (120.0 / -mvPosition.z);
+                    gl_PointSize = clamp(size, 1.0, 6.0);
+                    gl_Position = projectionMatrix * mvPosition;
+                }
+            `,
+            fragmentShader: `
+                uniform vec3 color;
+                void main() {
+                    if (length(gl_PointCoord - vec2(0.5)) > 0.5) discard;
+                    gl_FragColor = vec4(color, 0.35);
+                }
+            `,
+            transparent: true,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false
+        });
+        
+        this.particles = new THREE.Points(geometry, material);
+        this.scene.add(this.particles);
+    }
+
+    initInteractiveObject() {
+        this.coreGroup = new THREE.Group();
+        this.coreGroup.position.set(0, 10, -15);
+
+        const ringMat = new THREE.MeshStandardMaterial({
+            color: 0x4a5568,
+            roughness: 0.25,
+            metalness: 0.35
+        });
+        
+        this.rings = [];
+        for (let i = 0; i < 3; i++) {
+            const ring = new THREE.Mesh(
+                new THREE.TorusGeometry(4 + i * 2.5, 0.25, 12, 64),
+                ringMat
+            );
+            this.coreGroup.add(ring);
+            this.rings.push(ring);
+        }
+
+        // ===== Core Inner (no fog, sharp energy) =====
+        const coreMat = new THREE.MeshStandardMaterial({
+            color: 0x2a1a0a,
+            emissive: 0xffa550,
+            emissiveIntensity: 0.0,
+            metalness: 0.0,
+            roughness: 0.95,
+            fog: false
+        });
+
+        this.coreInner = new THREE.Mesh(
+            new THREE.SphereGeometry(1.8, 32, 32),
+            coreMat
+        );
+
+        // ===== Core Haze Shell (fog enabled, soft glow) =====
+        this.coreShells = [];
+
+        const shellConfigs = [
+            { scale: 1.20, opacity: 0.40, emissive: 0.4 },
+            { scale: 1.40, opacity: 0.34, emissive: 0.25 },
+            { scale: 1.55, opacity: 0.28, emissive: 0.12 }
+        ];
+
+        shellConfigs.forEach(cfg => {
+            const mat = new THREE.MeshStandardMaterial({
+                color: 0xffa550,
+                emissive: 0xffa550,
+                emissiveIntensity: cfg.emissive,
+                transparent: true,
+                opacity: cfg.opacity,
+                roughness: 1.0,
+                metalness: 0.0,
+                fog: true,
+                depthWrite: false,
+                blending: THREE.AdditiveBlending
+            });
+
+            const shell = new THREE.Mesh(
+                new THREE.SphereGeometry(1.8 * cfg.scale, 32, 32),
+                mat
+            );
+            
+            shell.scale.setScalar(1.0);
+            shell.material.opacity = 0.0;
+
+            this.coreGroup.add(shell);
+            this.coreShells.push(shell);
+        });
+
+        // 렌더 순서 중요: 쉘 → 이너
+        this.coreGroup.add(this.coreInner);
+
+        this.scene.add(this.coreGroup);
+    }
+
+    initHaze() {
+        const hazeMat = new THREE.MeshBasicMaterial({
+            color: 0x2a344a,
+            transparent: true,
+            opacity: 0.025,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending,
+            side: THREE.DoubleSide
+        });
+        for (let i = 0; i < 3; i++) {
+            const haze = new THREE.Mesh(new THREE.PlaneGeometry(150, 60), hazeMat.clone());
+            haze.position.set(0, 30, -35 + i * 25);
+            this.hazePlanes.push(haze);
+            this.scene.add(haze);
+        }
+    }
+
+    createBeam(light, length, radius, color, opacity) {
+        const geometry = new THREE.ConeGeometry(radius, length, 24, 1, true);
+        const material = new THREE.MeshBasicMaterial({
+            color,
+            transparent: true,
+            opacity,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending,
+            side: THREE.DoubleSide
+        });
+        const beam = new THREE.Mesh(geometry, material);
+        beam.position.copy(light.position);
+        beam.lookAt(light.target.position);
+        beam.rotateX(Math.PI / 2);
+        beam.translateY(-length / 2);
+        return beam;
+    }
+
+    updateLighting(energy, focus) {
+        const { dragForce, dragActive } = signals.params;
+        const interactionBoost = dragActive * (0.8 + dragForce * 4.0);
+        
+        this.lights.key.intensity = 2.0 + energy * 1.5;
+        this.lights.spotMain.intensity = 4.5 + focus * 3.5;
+        
+        // Massive core light emission spreading into space
+        const coreIntensity = 4.0 + interactionBoost * 60.0 + energy * 10.0;
+        this.lights.accent.intensity =
+            THREE.MathUtils.clamp(coreIntensity, 0, 40);
+
+        this.lights.accent.distance =
+            120 + interactionBoost * 120;
+
+        this.lights.accent.decay = 1.0;
+
+        // Sync light position with moving core
+        this.lights.accent.position.copy(this.coreGroup.position);
+        
+        // 목표 에너지 (클릭 중이면 1, 아니면 0)
+        const targetCoreEnergy = dragActive ? 1.0 : 0.0;
+        this.coreEnergy += (targetCoreEnergy - this.coreEnergy) * 0.08;
+        
+        this.coreInner.material.emissiveIntensity =
+            THREE.MathUtils.lerp(0.8, 4.5, this.coreEnergy);
+
+        this.beams[0].material.opacity = 0.25 + focus * 0.45;
+        this.hazePlanes.forEach((haze, index) => {
+            haze.material.opacity =
+                0.025 + focus * 0.04 - index * 0.008;
+        });
+        
+        this.lights.coreGlow.intensity =
+            THREE.MathUtils.clamp(2.0 + interactionBoost * 12.0, 0, 16);
+
+        this.lights.coreGlow.position.copy(this.coreGroup.position);
+        
+        this.coreShells.forEach((shell, i) => {
+            const cfg = [1.20, 1.40, 1.55][i];
+
+            // scale
+            const targetScale = THREE.MathUtils.lerp(1.0, cfg, this.coreEnergy);
+            shell.scale.setScalar(targetScale);
+
+            // opacity
+            shell.material.opacity =
+                THREE.MathUtils.lerp(0.0, 0.35 - i * 0.06, this.coreEnergy);
+        });
+    }
+
+    updateCamera(position) {
+        const t = this.clock.elapsedTime;
+        
+        // 🔴 반드시 필요
+        this._lookTarget ||= new THREE.Vector3();
+        this._lookTargetCurrent ||= new THREE.Vector3(0, 10, -15);
+
+        // === 마우스 [-0.5, 0.5] ===
+        const positionRange = 2.0
+        const mxRaw = (position.x - 0.5) * positionRange;
+        const myRaw = (position.y - 0.5) * positionRange;
+        
+        // === dead zone + edge emphasis ===
+        const mx = edgeWeightedInput(mxRaw, 0.25, 3.0);
+        const my = edgeWeightedInput(myRaw, 0.25, 3.0);
+
+        // === 카메라 위치 (거의 고정) ===
+        const basePos = this._baseCamPos ||= new THREE.Vector3();
+        basePos.set(
+            -12 + Math.sin(t * 0.3) * 1.2,
+            16  + Math.cos(t * 0.25) * 1.0,
+            45
+        );
+        this.camera.position.lerp(basePos, 0.05);
+
+        // === 목표 시선 ===
+        const lookBase = this._lookBase ||= new THREE.Vector3(0, 10, -15);
+        this._lookTarget.set(
+            lookBase.x + mx * 4.0,
+            lookBase.y + my * 4.0,
+            lookBase.z
+        );
+
+        // === 🔑 핵심: 비대칭 반응 속도 ===
+        const inputMagnitude = Math.max(Math.abs(mx), Math.abs(my));
+
+        if (inputMagnitude > 0.01) {
+            // ✅ 가장자리: 즉각 반응 (스냅)
+            this._lookTargetCurrent.copy(this._lookTarget);
+        } else {
+            // ✅ 중앙 복귀: 천천히
+            this._lookTargetCurrent.lerp(this._lookTarget, 0.04);
+        }
+
+        this.camera.lookAt(this._lookTargetCurrent);
+    }
+
+
+    updateCore(dragForce, energy) {
+        const { dragActive } = signals.params;
+        const t = this.clock.elapsedTime;
+        this.rings.forEach((ring, i) => {
+            ring.rotation.x += 0.012 * (i + 1) + dragForce * 0.12;
+            ring.rotation.z += 0.018 * (i + 1) + dragForce * 0.18;
+            ring.scale.setScalar(1 + Math.sin(t * 2.5 + i) * 0.06 * energy);
+        });
+        this.coreGroup.position.y = 10 + Math.sin(t * 1.8) * 1.2 + dragForce * 5.0;
     }
 
     draw() {
-        const now = performance.now();
-        const dt = (now - this.lastTime) / 1000;
-        this.lastTime = now;
-        this.time += dt;
+        const dt = this.clock.getDelta();
+        if (dt > 0.1) return;
 
-        const { energy, focus, position, drift } = signals.params;
-        const ctx = this.ctx;
-
-        // 1. Clear with deep fade (Trails effect)
-        ctx.fillStyle = `rgba(5, 5, 8, ${0.14 + (1 - focus) * 0.1})`;
-        ctx.fillRect(0, 0, this.width, this.height);
-
-        // 2. Draw Lighting Field (3D Simulation)
-        this.drawLightingField(ctx, position, energy, focus);
-
-        // 3. Draw Central Mesh (TouchDesigner-inspired wireform)
-        this.drawMesh(ctx, energy, focus, drift);
-
-        // 4. Draw Aura Layer (Plasma skin)
-        this.drawAura(ctx, energy, focus, drift);
-
-        // 5. Post-process (Vignette/Noise)
-        this.drawVignette(ctx);
-    }
-
-    drawLightingField(ctx, pos, energy, focus) {
-        const centerX = (0.5 + (pos.x - 0.5) * 0.15) * this.width;
-        const centerY = (0.5 + (pos.y - 0.5) * 0.15) * this.height;
-        // Primary Light Source (Cursor focus)
-        const radius = (200 + energy * 400) * (0.5 + focus);
-        const gradient = ctx.createRadialGradient(centerX, centerY, 0, centerX, centerY, radius);
+        const { energy, focus, position, dragForce } = signals.params;
         
-        const alpha = 0.08 + energy * 0.2;
-        gradient.addColorStop(0, `rgba(125, 102, 255, ${alpha})`); 
-        gradient.addColorStop(0.5, `rgba(60, 40, 120, ${alpha * 0.3})`);
-        gradient.addColorStop(1, 'rgba(5, 5, 10, 0)');
-        
-        ctx.fillStyle = gradient;
-        ctx.globalCompositeOperation = 'screen';
-        ctx.fillRect(0, 0, this.width, this.height);
-
-        ctx.globalCompositeOperation = 'source-over';
-    }
-
-    drawMesh(ctx, energy, focus, drift) {
-        const centerX = this.width / 2;
-        const centerY = this.height / 2;
-        const baseRadius = Math.min(this.width, this.height) * 0.2;
-        const swell = 0.25 + energy * 0.8;
-        const ripple = 0.1 + focus * 0.5;
-        const rotation = drift * 0.5 + this.time * 0.25;
-        const cursorX = (signals.params.position.x - 0.5) * 2;
-        const cursorY = (signals.params.position.y - 0.5) * 2;
-        const tilt = Math.sin(this.time * 0.3) * 0.45 + cursorY * 0.7;
-        const yaw = rotation + cursorX * 0.9;
-        const roll = Math.sin(this.time * 0.2) * 0.25 + cursorX * 0.2;
-        const focal = 700;
-        const velocity = signals.params.velocity;
-        const stretchEnergy = Math.max(0, velocity - 0.05);
-        const dirMag = Math.hypot(cursorX, -cursorY, 0.4);
-        const dir = {
-            x: dirMag > 0 ? cursorX / dirMag : 0,
-            y: dirMag > 0 ? -cursorY / dirMag : 0,
-            z: dirMag > 0 ? 0.4 / dirMag : 0.4
-        };
-
-        ctx.globalCompositeOperation = 'screen';
-        ctx.strokeStyle = `rgba(185, 195, 255, ${0.25 + energy * 0.35})`;
-        ctx.lineWidth = 1;
-
-        const projected = new Array(this.mesh.length);
-        const offsets = new Array(this.mesh.length);
-        const dragForce = signals.params.dragForce;
-        for (let i = 0; i < this.mesh.length; i++) {
-            const vert = this.mesh[i];
-            const wobble = Math.sin(vert.theta * 4 + this.time * 1.1) * Math.cos(vert.phi * 3 - this.time * 0.7);
-            const pulse = Math.sin(this.time * 0.7 + vert.u * 8) * Math.sin(this.time * 0.5 + vert.v * 7);
-            const torsion = Math.sin(vert.theta * 6 + this.time * 0.8) * Math.sin(vert.phi * 4 - this.time * 0.4);
-            const cursorField = Math.cos(vert.theta - cursorX) * Math.cos(vert.phi - cursorY) * 0.15;
-            const radius = baseRadius * (1 + wobble * ripple + pulse * swell * 0.25 + torsion * 0.15 + cursorField * (0.2 + energy * 0.3));
-
-            const x = Math.cos(vert.theta) * Math.cos(vert.phi) * radius;
-            const y = Math.sin(vert.phi) * radius;
-            const z = Math.sin(vert.theta) * Math.cos(vert.phi) * radius;
-            const normMag = Math.hypot(x, y, z) || 1;
-            const normal = { x: x / normMag, y: y / normMag, z: z / normMag };
-            const vib = Math.sin(this.time * 14 + vert.theta * 2 - vert.phi * 3) * dragForce;
-            const vib2 = Math.cos(this.time * 11 + vert.u * 10 + vert.v * 6) * dragForce;
-            const vibAmp = baseRadius * 0.02 * (vib + vib2);
-            const vx = x + normal.x * vibAmp;
-            const vy = y + normal.y * vibAmp;
-            const vz = z + normal.z * vibAmp;
-            const alignment = Math.max(0, normal.x * dir.x + normal.y * dir.y + normal.z * dir.z);
-            const mask = vert.stretchMask > 0.94 ? 1 : 0;
-            const stretchTarget = stretchEnergy * mask * alignment * alignment * 3.5;
-            vert.stretch += (stretchTarget - vert.stretch) * 0.08;
-            const stretchDirMag = Math.hypot(
-                normal.x * 0.6 + dir.x * 0.4,
-                normal.y * 0.6 + dir.y * 0.4,
-                normal.z * 0.6 + dir.z * 0.4
-            ) || 1;
-            const stretchDir = {
-                x: (normal.x * 0.6 + dir.x * 0.4) / stretchDirMag,
-                y: (normal.y * 0.6 + dir.y * 0.4) / stretchDirMag,
-                z: (normal.z * 0.6 + dir.z * 0.4) / stretchDirMag
-            };
-            const stretchDistance = baseRadius * vert.stretch * (1.5 + velocity * 3);
-            const sx = vx + stretchDir.x * stretchDistance;
-            const sy = vy + stretchDir.y * stretchDistance;
-            const sz = vz + stretchDir.z * stretchDistance;
-
-            let rx = sx;
-            let ry = sy * Math.cos(tilt) - sz * Math.sin(tilt);
-            let rz = sy * Math.sin(tilt) + sz * Math.cos(tilt);
-
-            let rx2 = rx * Math.cos(yaw) + rz * Math.sin(yaw);
-            let rz2 = -rx * Math.sin(yaw) + rz * Math.cos(yaw);
-
-            let rx3 = rx2 * Math.cos(roll) - ry * Math.sin(roll);
-            let ry3 = rx2 * Math.sin(roll) + ry * Math.cos(roll);
-
-            const perspective = focal / (focal + rz2 + baseRadius * 2);
-            projected[i] = {
-                x: centerX + rx3 * perspective,
-                y: centerY + ry3 * perspective,
-                z: rz2
-            };
-            offsets[i] = { normal, stretch: vert.stretch };
+        // Use GPU for particle updates
+        if (this.particles) {
+            this.particles.material.uniforms.time.value = this.clock.elapsedTime;
+            this.particles.material.uniforms.energy.value = energy;
         }
 
-        this.meshFrame = { projected, centerX, centerY, offsets };
+        this.updateLighting(energy, focus);
+        this.updateCamera(position);
+        this.updateCore(dragForce, energy);
 
-        for (let v = 0; v <= this.meshRows; v++) {
-            for (let u = 0; u <= this.meshCols; u++) {
-                const idx = v * (this.meshCols + 1) + u;
-                const p = projected[idx];
-                if (!p) continue;
+        this.beams.forEach((beam) => {
+            beam.position.copy(this.lights.spotMain.position);
+            beam.lookAt(this.lights.spotMain.target.position);
+            beam.rotateX(Math.PI / 2);
+            beam.translateY(-60);
+        });
 
-                if (u < this.meshCols) {
-                    const p2 = projected[idx + 1];
-                    const alpha = 0.25 + energy * 0.5;
-                    ctx.strokeStyle = `rgba(185, 195, 255, ${alpha})`;
-                    ctx.beginPath();
-                    ctx.moveTo(p.x, p.y);
-                    ctx.lineTo(p2.x, p2.y);
-                    ctx.stroke();
-                }
-                if (v < this.meshRows) {
-                    const p3 = projected[idx + (this.meshCols + 1)];
-                    const alpha = 0.2 + focus * 0.5;
-                    ctx.strokeStyle = `rgba(140, 160, 255, ${alpha})`;
-                    ctx.beginPath();
-                    ctx.moveTo(p.x, p.y);
-                    ctx.lineTo(p3.x, p3.y);
-                    ctx.stroke();
-                }
-            }
-        }
-
-        ctx.globalCompositeOperation = 'source-over';
-    }
-
-    drawAura(ctx, energy, focus, drift) {
-        if (!this.meshFrame) return;
-        const { projected, centerX, centerY, offsets } = this.meshFrame;
-        const layers = 3;
-        const flow = this.time * 0.6 + drift * 0.5;
-        const velocity = signals.params.velocity;
-        const glowBase = 0.08 + energy * 0.2 + focus * 0.15;
-
-        ctx.globalCompositeOperation = 'screen';
-        for (let layer = 0; layer < layers; layer++) {
-            const phase = layer / layers;
-            const thickness = 3 + phase * 3 + velocity * 6;
-            const alpha = glowBase * (1 - phase * 0.5);
-            ctx.lineWidth = 0.7 + phase * 0.4;
-
-            for (let v = 0; v <= this.meshRows; v += 2) {
-                ctx.beginPath();
-                for (let u = 0; u <= this.meshCols; u++) {
-                    const idx = v * (this.meshCols + 1) + u;
-                    const p = projected[idx];
-                    if (!p) continue;
-
-                    const dx = p.x - centerX;
-                    const dy = p.y - centerY;
-                    const mag = Math.hypot(dx, dy) || 1;
-                    const flare = Math.sin(flow + u * 0.12 + v * 0.08) * (0.6 + focus * 0.6);
-                    const stretchBias = offsets[idx]?.stretch || 0;
-                    const offsetScale = thickness * (1 + flare * 0.4 + stretchBias * 1.2) * (0.7 + phase * 0.6);
-                    const ox = dx / mag;
-                    const oy = dy / mag;
-                    const x = p.x + ox * offsetScale;
-                    const y = p.y + oy * offsetScale;
-                    if (u === 0) ctx.moveTo(x, y);
-                    else ctx.lineTo(x, y);
-                }
-                ctx.strokeStyle = `rgba(120, 165, 255, ${alpha})`;
-                ctx.stroke();
-            }
-        }
-
-        ctx.globalCompositeOperation = 'source-over';
-    }
-
-    drawVignette(ctx) {
-        const gradient = ctx.createRadialGradient(this.width/2, this.height/2, this.width/4, this.width/2, this.height/2, this.width);
-        gradient.addColorStop(0, 'rgba(0,0,0,0)');
-        gradient.addColorStop(1, 'rgba(0,0,0,0.8)');
-        ctx.fillStyle = gradient;
-        ctx.fillRect(0, 0, this.width, this.height);
+        this.renderer.render(this.scene, this.camera);
     }
 }

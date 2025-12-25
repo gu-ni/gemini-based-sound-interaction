@@ -11,7 +11,7 @@ import { Renderer } from './visuals/Renderer.js';
 class App {
     constructor() {
         this.renderer = new Renderer('gl-canvas');
-        this.interaction = new Interaction();
+        this.interaction = null;
         this.statusLabel = document.getElementById('interaction-status');
         this.startScreen = document.getElementById('start-screen');
         this.audioFaulted = false;
@@ -31,6 +31,7 @@ class App {
         this.startScreen.classList.add('hidden');
         await audioEngine.init();
         
+        this.interaction = new Interaction();
         this.initialized = true;
     }
 

@@ -1,40 +1,57 @@
 /**
  * Signals.js
- * Manages shared abstract parameters with smoothing and inertia.
+ * Shared continuous signal state with smoothing and inertia.
+ * Input is handled externally (Interaction.js).
  */
 
 export class Signals {
     constructor() {
+        /* =========================
+         * Public parameters (smoothed)
+         * ========================= */
         this.params = {
-            energy: 0.08,   // Global activity level (0-1)
-            focus: 0.06,    // Interaction concentration (0-1)
-            depth: 0.5,     // Spatial depth/fog level (0-1)
-            resonance: 0.2, // Harmonic complexity (0-1)
-            texture: 0.12,  // Particle/noise density (0-1)
-            drag: 0,        // Intentional dragging movement (0-1)
-            dragActive: 0,  // Click-and-drag active state (0-1)
-            velocity: 0,    // Smoothed cursor speed (0-1)
-            sharpness: 0,   // Smoothed cursor angularity (0-1)
-            dragForce: 0,   // Smoothed drag dynamics (0-1)
-            position: { x: 0.5, y: 0.5 }, // Smoothed cursor position
-            drift: 0        // Autonomous system drift
+            energy: 0.08,
+            focus: 0.06,
+            depth: 0.5,
+            resonance: 0.2,
+            texture: 0.12,
+
+            drag: 0,
+            dragActive: 0,
+            dragForce: 0,
+
+            velocity: 0,
+            sharpness: 0,
+
+            position: { x: 0.5, y: 0.5 },
+            drift: 0
         };
 
-        this.targets = { ...this.params };
-        this.targets.position = { x: 0.5, y: 0.5 };
-        
-        // Smoothing factors (lerp weights)
+        /* =========================
+         * Raw targets (written by Interaction)
+         * ========================= */
+        this.targets = {
+            ...this.params,
+            position: { x: 0.5, y: 0.5 }
+        };
+
+        /* =========================
+         * Smoothing factors
+         * ========================= */
         this.smoothing = {
             energy: 0.02,
             focus: 0.05,
             depth: 0.01,
             resonance: 0.03,
             texture: 0.02,
+
             drag: 0.05,
             dragActive: 0.2,
+            dragForce: 0.07,
+
             velocity: 0.08,
             sharpness: 0.08,
-            dragForce: 0.07,
+
             position: 0.08,
             drift: 0.005
         };
@@ -42,45 +59,66 @@ export class Signals {
         this.lastTime = performance.now();
     }
 
+    /* =========================
+     * Frame update (called from main loop)
+     * ========================= */
     update() {
         const now = performance.now();
         const dt = (now - this.lastTime) / 1000;
         this.lastTime = now;
 
-        // Apply autonomous drift
+        /* --- autonomous drift --- */
         this.targets.drift += dt * 0.1;
 
-        // Maintain a low, autonomous baseline so visuals/audio never go fully dark
-        const baseEnergy = 0.06 + Math.sin(this.targets.drift * 0.6) * 0.02;
-        const baseFocus = 0.05 + Math.cos(this.targets.drift * 0.4) * 0.02;
+        const baseEnergy =
+            0.06 + Math.sin(this.targets.drift * 0.6) * 0.02;
+        const baseFocus =
+            0.05 + Math.cos(this.targets.drift * 0.4) * 0.02;
+
         this.targets.energy = Math.max(this.targets.energy, baseEnergy);
         this.targets.focus = Math.max(this.targets.focus, baseFocus);
-        
-        // Idle decay: energy and focus naturally trend towards 0 if no perturbation
+
+        /* --- idle decay (continuous signals only) --- */
         this.targets.energy *= 0.995;
         this.targets.focus *= 0.99;
         this.targets.drag *= 0.95;
         this.targets.velocity *= 0.88;
         this.targets.sharpness *= 0.85;
         this.targets.dragForce *= 0.86;
+        // ❌ dragActive는 decay하지 않음
 
-        // Lerp params towards targets
+        /* --- smoothing / lerp --- */
         for (const key in this.params) {
             if (key === 'position') {
-                this.params.position.x += (this.targets.position.x - this.params.position.x) * this.smoothing.position;
-                this.params.position.y += (this.targets.position.y - this.params.position.y) * this.smoothing.position;
+                this.params.position.x +=
+                    (this.targets.position.x - this.params.position.x) *
+                    this.smoothing.position;
+                this.params.position.y +=
+                    (this.targets.position.y - this.params.position.y) *
+                    this.smoothing.position;
+
+            } else if (key === 'dragActive') {
+                // 🔥 binary state: 그대로 전달
+                this.params.dragActive = this.targets.dragActive;
+
             } else if (typeof this.params[key] === 'number') {
-                this.params[key] += (this.targets[key] - this.params[key]) * this.smoothing[key];
+                this.params[key] +=
+                    (this.targets[key] - this.params[key]) *
+                    this.smoothing[key];
             }
         }
     }
 
+    /* =========================
+     * APIs used by Interaction.js
+     * ========================= */
     perturb(key, value, force = false) {
+        if (!(key in this.targets)) return;
+
         if (force) {
             this.params[key] = value;
             this.targets[key] = value;
         } else {
-            // Most perturbations are additive or multiplicative to feel like signals
             if (key === 'energy') {
                 this.targets.energy = Math.min(1, this.targets.energy + value);
             } else {
@@ -95,4 +133,7 @@ export class Signals {
     }
 }
 
+/* =========================
+ * Shared singleton
+ * ========================= */
 export const signals = new Signals();
