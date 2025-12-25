@@ -72,17 +72,20 @@ export class AudioEngine {
         this.leadSynth.volume.value = -100; // Start silent
 
         // --- LAYER 5: Super-saw mass (Click + Drag) ---
-        this.superSaw = new Tone.MonoSynth({
-            oscillator: { type: 'fatsawtooth', count: 3, spread: 22 },
-            envelope: { attack: 0.6, decay: 0.8, sustain: 0.7, release: 2.4 },
-            filter: { Q: 0.8, type: 'lowpass', rolloff: -24 }
+        this.superSawOsc = new Tone.FatOscillator({
+            type: 'sawtooth',
+            count: 5,
+            spread: 30
         });
+        this.superSawFilter = new Tone.Filter(800, 'lowpass', -24);
+        this.superSawAmp = new Tone.Gain(0);
         this.superSawDist = new Tone.Distortion({ distortion: 0.15, wet: 0.1 }).connect(this.limiter);
         this.superSawDry = new Tone.Gain(1).connect(this.limiter);
-        this.superSaw.connect(this.superSawDist);
-        this.superSaw.connect(this.superSawDry);
-        this.superSaw.connect(this.fxSend);
-        this.superSaw.volume.value = -100;
+        this.superSawOsc.connect(this.superSawFilter);
+        this.superSawFilter.connect(this.superSawAmp);
+        this.superSawAmp.connect(this.superSawDist);
+        this.superSawAmp.connect(this.superSawDry);
+        this.superSawAmp.connect(this.fxSend);
 
         this.initialized = true;
         this.startGenerativeLoop();
@@ -91,7 +94,8 @@ export class AudioEngine {
         const chord = this.chords[this.currentChordIndex];
         const baseNote = chord[1] ?? chord[0];
         const note = Tone.Frequency(baseNote).transpose(-2).toFrequency();
-        this.superSaw.triggerAttack(note);
+        this.superSawOsc.frequency.value = note;
+        this.superSawOsc.start();
         this.superSawActive = true;
     }
 
@@ -185,26 +189,17 @@ export class AudioEngine {
         const dynamic = dragForce * dragActive;
         const note = Tone.Frequency(baseNote).transpose(-2 + dynamic * 5).toFrequency();
         const cutoffTarget = 350 + dynamic * 1800 + sharpness * 2200;
-        const attack = 0.6 - sharpness * 0.4;
         const distAmount = 0.05 + sharpness * 0.45;
         const spread = 14 + dynamic * 35;
 
-        this.superSaw.envelope.attack = Math.max(0.08, attack);
-        this.superSaw.filter.Q.value = 0.6 + sharpness * 6;
-        this.superSaw.filter.frequency.rampTo(cutoffTarget, 0.2);
-        if (this.superSaw.oscillator?.spread !== undefined) {
-            this.superSaw.oscillator.spread = spread;
-        }
+        this.superSawFilter.Q.value = 0.6 + sharpness * 6;
+        this.superSawFilter.frequency.rampTo(cutoffTarget, 0.2);
+        this.superSawOsc.spread = spread;
         this.superSawDist.wet.rampTo(0.08 + Math.min(0.4, sharpness * 0.6) * dragActive, 0.2);
         this.superSawDist.distortion = distAmount;
-        const targetVolume = -100 + dragActive * (70 + dynamic * 14);
-        this.superSaw.volume.rampTo(targetVolume, 0.2);
-
-        if (!this.superSawActive) {
-            this.superSaw.triggerAttack(note);
-            this.superSawActive = true;
-        }
-        this.superSaw.frequency.rampTo(note, 0.1);
+        const targetDb = -40 + dragActive * (20 + dynamic * 10);
+        this.superSawAmp.gain.rampTo(Tone.dbToGain(targetDb), 0.2);
+        this.superSawOsc.frequency.rampTo(note, 0.1);
     }
 }
 
